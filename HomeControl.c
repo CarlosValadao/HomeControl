@@ -1,67 +1,98 @@
-#include <stdio.h>               // Biblioteca padrão para entrada e saída
-#include <string.h>              // Biblioteca manipular strings
-#include <stdlib.h>              // funções para realizar várias operações, incluindo alocação de memória dinâmica (malloc)
+// ================================ BIBLIOTECAS ================================
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
-#include "pico/stdlib.h"         // Biblioteca da Raspberry Pi Pico para funções padrão (GPIO, temporização, etc.)
-#include "hardware/adc.h"        // Biblioteca da Raspberry Pi Pico para manipulação do conversor ADC
-#include "pico/cyw43_arch.h"     // Biblioteca para arquitetura Wi-Fi da Pico com CYW43  
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "pico/cyw43_arch.h"
+#include "hardware/clocks.h"
+#include "pico/bootrom.h"
 
-#include "lwip/pbuf.h"           // Lightweight IP stack - manipulação de buffers de pacotes de rede
-#include "lwip/tcp.h"            // Lightweight IP stack - fornece funções e estruturas para trabalhar com o protocolo TCP
-#include "lwip/netif.h"          // Lightweight IP stack - fornece funções e estruturas para trabalhar com interfaces de rede (netif)
+#include "lwip/pbuf.h"
+#include "lwip/tcp.h"
+#include "lwip/netif.h"
 
-#include "FreeRTOS.h"
-#include "task.h"
+// Bibliotecas personalizadas do projeto
+#include "lib/ws2812b.h"
+#include "lib/rgb.h"
+#include "lib/oledgfx.h"
+#include "lib/push_button.h"
 
+// ================================ CONFIGURAÇÕES Wi-Fi ================================
 // Credenciais WIFI - Tome cuidado se publicar no github!
-#define WIFI_SSID "ssid"
-#define WIFI_PASSWORD "password"
+#define WIFI_SSID "Nilson"
+#define WIFI_PASSWORD "casaesnet"
 
+// ================================ DEFINIÇÕES DE PINOS ================================
 // Definição dos pinos dos LEDs
-#define LED_PIN CYW43_WL_GPIO_LED_PIN   // GPIO do CI CYW43
+#define LED_PIN CYW43_WL_GPIO_LED_PIN   // GPIO do CI CYW43 (LED interno da Pico W)
 #define LED_BLUE_PIN 12                 // GPIO12 - LED azul
 #define LED_GREEN_PIN 11                // GPIO11 - LED verde
 #define LED_RED_PIN 13                  // GPIO13 - LED vermelho
 
-// Inicializar os Pinos GPIO para acionamento dos LEDs da BitDogLab
-void gpio_led_bitdog(void);
+// Configuração do barramento I2C
+#define I2C_PORT i2c1
 
+// ================================ CONFIGURAÇÕES DO DISPLAY OLED ================================
+/// @brief OLED display pin configuration
+#define OLED_SDA 14      ///< Serial data pin (pino de dados serial)
+#define OLED_SCL 15      ///< Serial clock pin (pino de clock serial)
+#define OLED_ADDR 0x3C   ///< I2C address of OLED (endereço I2C do OLED)
+#define OLED_BAUDRATE 400000  ///< I2C communication speed (velocidade de comunicação I2C)
+
+// ================================ MACROS E FUNÇÕES UTILITÁRIAS ================================
+// Macro para entrar em modo bootsel (reinicialização por USB)
+#define set_bootsel_mode() reset_usb_boot(0, 0)
+
+// ================================ VARIÁVEIS GLOBAIS ================================
+// Padrão de bits para acender todas as luzes (5x5 matriz)
+static uint8_t all_lights_glyph[] = { 1, 1, 1, 1, 1,
+                               1, 1, 1, 1, 1,
+                               1, 1, 1, 1, 1,
+                               1, 1, 1, 1, 1,
+                               1, 1, 1, 1, 1
+                            };
+
+// Ponteiros globais para os periféricos (para acesso nas callbacks)
+static ws2812b_t *ws_global = NULL;   // Ponteiro global para WS2812B (fita LED)
+static rgb_t *rgb_global = NULL;      // Ponteiro global para LEDs RGB
+static ssd1306_t *ssd_global = NULL;  // Ponteiro global para display OLED
+
+// ================================ DECLARAÇÕES DE FUNÇÕES ================================
 // Função de callback ao aceitar conexões TCP
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err);
 
 // Função de callback para processar requisições HTTP
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err);
 
-// Leitura da temperatura interna
+// Leitura da temperatura interna do microcontrolador
 float temp_read(void);
 
-// Tratamento do request do usuário
+// Tratamento das requisições do usuário (controle dos dispositivos)
 void user_request(char **request);
 
+/**
+ * @brief GPIO interrupt callback for button presses
+ * @param gpio GPIO pin that triggered interrupt
+ * @param event Type of interrupt event
+ */
+static void gpio_irq_callback(uint gpio, uint32_t event);
 
-void vsystem_monitor_task(void *pvParameters);
-void vsystem_init(void);
-void vupdate_system_status_page(void);
-void vhandle_light_control_request(struct netconn *newconn);
-void send_status_page(struct netconn *newconn);
+void vSystemMonitorTask(void *pvParameters);
+void vSystemInit(void);
+void vUpdateSystemStatusPage(void);
 void init_web_server(void);
 void liquid_level_control_task(void *pvParameters);
-int read_liquid_level(void);
-void temperature_control_task(void *pvParameters);
-float read_temperature(void);
-void ldr_sensor_task(void *pvParameters);
-void pir_sensor_task(void *pvParameters);
-
-
+int read_water_level(void);
+void vLDRTask(void *pvParameters);
+void vPIRTask(void *pvParameters);
 
 // Função principal
 int main()
 {
     //Inicializa todos os tipos de bibliotecas stdio padrão presentes que estão ligados ao binário.
     stdio_init_all();
-
-    // Inicializar os Pinos GPIO para acionamento dos LEDs da BitDogLab
-    gpio_led_bitdog();
 
     //Inicializa a arquitetura do cyw43
     while (cyw43_arch_init())
@@ -137,142 +168,254 @@ int main()
 
 // -------------------------------------- Funções ---------------------------------
 
-// Inicializar os Pinos GPIO para acionamento dos LEDs da BitDogLab
-void gpio_led_bitdog(void){
-    // Configuração dos LEDs como saída
-    gpio_init(LED_BLUE_PIN);
-    gpio_set_dir(LED_BLUE_PIN, GPIO_OUT);
-    gpio_put(LED_BLUE_PIN, false);
-    
-    gpio_init(LED_GREEN_PIN);
-    gpio_set_dir(LED_GREEN_PIN, GPIO_OUT);
-    gpio_put(LED_GREEN_PIN, false);
-    
-    gpio_init(LED_RED_PIN);
-    gpio_set_dir(LED_RED_PIN, GPIO_OUT);
-    gpio_put(LED_RED_PIN, false);
-}
-
 // Função de callback ao aceitar conexões TCP
 static err_t tcp_server_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
 {
     tcp_recv(newpcb, tcp_server_recv);
     return ERR_OK;
 }
-
-// Tratamento do request do usuário - digite aqui
 void user_request(char **request){
-
-    if (strstr(*request, "GET /blue_on") != NULL)
+    printf("Processando requisição: %s\n", *request);
+    
+    if (strstr(*request, "GET /ligar_arcondicionado") != NULL)
     {
-        gpio_put(LED_BLUE_PIN, 1);
+        printf("Comando: Ligar Ar Condicionado\n");
+        // TODO: Implementar controle do ar condicionado
     }
-    else if (strstr(*request, "GET /blue_off") != NULL)
+    else if (strstr(*request, "GET /ligar_luzes") != NULL)  // CORRIGIDO: era /ligar_lampadas
     {
-        gpio_put(LED_BLUE_PIN, 0);
+        printf("Comando: Ligar Luzes\n");
+        // TODO: Implementar controle das luzes
     }
-    else if (strstr(*request, "GET /green_on") != NULL)
+    else if (strstr(*request, "GET /sleep_arcondicionado") != NULL)
     {
-        gpio_put(LED_GREEN_PIN, 1);
+        printf("Comando: Sleep Ar Condicionado\n");
+        // TODO: Implementar modo sleep do ar condicionado
     }
-    else if (strstr(*request, "GET /green_off") != NULL)
+    else if (strstr(*request, "GET /desligar_lampadas") != NULL)
     {
-        gpio_put(LED_GREEN_PIN, 0);
+        printf("Comando: Desligar Lâmpadas\n");
+        // TODO: Implementar desligamento das lâmpadas
     }
-    else if (strstr(*request, "GET /red_on") != NULL)
+    else if (strstr(*request, "GET /desligar_bomba_agua") != NULL)  // CORRIGIDO: era /desligar_bomba
     {
-        gpio_put(LED_RED_PIN, 1);
-    }
-    else if (strstr(*request, "GET /red_off") != NULL)
-    {
-        gpio_put(LED_RED_PIN, 0);
-    }
-    else if (strstr(*request, "GET /on") != NULL)
-    {
-        cyw43_arch_gpio_put(LED_PIN, 1);
-    }
-    else if (strstr(*request, "GET /off") != NULL)
-    {
-        cyw43_arch_gpio_put(LED_PIN, 0);
+        printf("Comando: Desligar Bomba d'Água\n");
+        // TODO: Implementar controle da bomba d'água
     }
 };
 
-// Leitura da temperatura interna
+/**
+ * @brief Leitura da temperatura interna do microcontrolador
+ * @return Temperatura em graus Celsius
+ * 
+ * Usa o sensor de temperatura interno do RP2040 via ADC
+ */
 float temp_read(void){
-    adc_select_input(4);
-    uint16_t raw_value = adc_read();
-    const float conversion_factor = 3.3f / (1 << 12);
+    adc_select_input(4);                                    // Seleciona canal 4 do ADC (sensor de temperatura)
+    uint16_t raw_value = adc_read();                        // Lê valor bruto do ADC (0-4095)
+    const float conversion_factor = 3.3f / (1 << 12);      // Fator de conversão (3.3V / 4096)
+    // Fórmula de conversão específica do RP2040 para temperatura
     float temperature = 27.0f - ((raw_value * conversion_factor) - 0.706f) / 0.001721f;
-        return temperature;
+    return temperature;
 }
 
-// Função de callback para processar requisições HTTP
+/**
+ * @brief Função de callback para processar requisições HTTP
+ * @param arg Argumento adicional (não usado)
+ * @param tpcb PCB TCP da conexão
+ * @param p Buffer de pacote recebido
+ * @param err Código de erro
+ * @return Código de erro
+ * 
+ * Esta é a função principal que processa as requisições HTTP e gera as respostas
+ */
 static err_t tcp_server_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
 {
+    // ========== VERIFICAÇÃO DE CONEXÃO ==========
+    // Se não há dados, fecha a conexão
     if (!p)
     {
-        tcp_close(tpcb);
-        tcp_recv(tpcb, NULL);
+        tcp_close(tpcb);        // Fecha a conexão TCP
+        tcp_recv(tpcb, NULL);   // Remove o callback de recepção
         return ERR_OK;
     }
 
-    // Alocação do request na memória dinámica
-    char *request = (char *)malloc(p->len + 1);
-    memcpy(request, p->payload, p->len);
-    request[p->len] = '\0';
+    // ========== PROCESSAMENTO DA REQUISIÇÃO ==========
+    // Alocação do request na memória dinâmica
+    char *request = (char *)malloc(p->len + 1);    // Aloca memória para a requisição
+    memcpy(request, p->payload, p->len);           // Copia dados do buffer de rede
+    request[p->len] = '\0';                        // Adiciona terminador de string
 
-    printf("Request: %s\n", request);
+    printf("Request: %s\n", request);              // Debug: imprime a requisição
 
-    // Tratamento de request - Controle dos LEDs
+    // ========== CONTROLE DOS DISPOSITIVOS ==========
+    // Tratamento de request - Controle dos LEDs e outros dispositivos
     user_request(&request);
     
-    // Leitura da temperatura interna
+    // ========== LEITURA DE SENSORES ==========
+    // Leitura da temperatura interna para exibir no dashboard
     float temperature = temp_read();
 
-    // Cria a resposta HTML
-    char html[1024];
+    // ========== GERAÇÃO DA RESPOSTA HTML ==========
+    // Cria a resposta HTML (buffer grande para a página completa)
+    char html[8400];
 
-    // Instruções html do webserver
-    snprintf(html, sizeof(html), // Formatar uma string e armazená-la em um buffer de caracteres
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: text/html\r\n"
-             "\r\n"
-             "<!DOCTYPE html>\n"
-             "<html>\n"
-             "<head>\n"
-             "<title> Embarcatech - LED Control </title>\n"
-             "<style>\n"
-             "body { background-color: #b5e5fb; font-family: Arial, sans-serif; text-align: center; margin-top: 50px; }\n"
-             "h1 { font-size: 64px; margin-bottom: 30px; }\n"
-             "button { background-color: LightGray; font-size: 36px; margin: 10px; padding: 20px 40px; border-radius: 10px; }\n"
-             ".temperature { font-size: 48px; margin-top: 30px; color: #333; }\n"
-             "</style>\n"
-             "</head>\n"
-             "<body>\n"
-             "<h1>Embarcatech: LED Control</h1>\n"
-             "<form action=\"./blue_on\"><button>Ligar Azul</button></form>\n"
-             "<form action=\"./blue_off\"><button>Desligar Azul</button></form>\n"
-             "<form action=\"./green_on\"><button>Ligar Verde</button></form>\n"
-             "<form action=\"./green_off\"><button>Desligar Verde</button></form>\n"
-             "<form action=\"./red_on\"><button>Ligar Vermelho</button></form>\n"
-             "<form action=\"./red_off\"><button>Desligar Vermelho</button></form>\n"
-             "<p class=\"temperature\">Temperatura Interna: %.2f &deg;C</p>\n"
-             "</body>\n"
-             "</html>\n",
-             temperature);
+    // ========== GERAÇÃO DA PÁGINA WEB ==========
+    // Instruções HTML do webserver - página completa de automação residencial
+        // Instruções html do webserver - CORRIGIDO
+    snprintf(html, 4096, // Formatar uma string e armazená-la em um buffer de caracteres
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=UTF-8\r\n"
+        "\r\n"
+        "<!DOCTYPE html>\n"
+        "<html lang=\"pt\">\n"
+        "<head>\n"
+        "<meta charset=\"UTF-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+        "<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">\n"
+        "<title>HomeControl - Automação Residencial</title>\n"
+        "<style>\n"
+        "body {\n"
+        "background-color: #000000;\n"
+        "font-family: 'Arial', sans-serif;\n"
+        "text-align: center;\n"
+        "margin-top: 20px;\n"
+        "color: #333;\n"
+        "}\n"
+        "h1 {\n"
+        "font-size: 48px;\n"
+        "color: #2b78e4;\n"
+        "margin-bottom: 30px;\n"
+        "font-weight: bold;\n"
+        "}\n"
+        "h2 {\n"
+        "color: #2b78e4;\n"
+        "}\n"
+        "button {\n"
+        "background-color: #4CAF50;\n"
+        "font-size: 24px;\n"
+        "margin: 10px;\n"
+        "padding: 15px 30px;\n"
+        "border-radius: 10px;\n"
+        "color: white;\n"
+        "border: none;\n"
+        "cursor: pointer;\n"
+        "transition: background-color 0.3s ease;\n"
+        "}\n"
+        "button:hover {\n"
+        "background-color: #45a049;\n"
+        "}\n"
+        "button:active {\n"
+        "background-color: #388e3c;\n"
+        "}\n"
+        ".temperature {\n"
+        "font-size: 36px;\n"
+        "margin-top: 30px;\n"
+        "color: #FF5722;\n"
+        "font-weight: bold;\n"
+        "}\n"
+        ".control-panel {\n"
+        "display: grid;\n"
+        "grid-template-columns: repeat(2, 1fr);\n"
+        "gap: 15px;\n"
+        "max-width: 600px;\n"
+        "margin: 0 auto;\n"
+        "}\n"
+        ".form-container {\n"
+        "padding: 20px;\n"
+        "background-color: #fff;\n"
+        "border-radius: 10px;\n"
+        "box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);\n"
+        "}\n"
+        ".control-panel form {\n"
+        "margin: 10px 0;\n"
+        "}\n"
+        "</style>\n"
+        "</head>\n"
+        "<body>\n"
+        "<h1>HomeControl - Automação Residencial</h1>\n"
+        "<div class=\"control-panel\">\n"
+        "<div class=\"form-container\">\n"
+        "<h2>Controle de Dispositivos</h2>\n"
+        "<form action=\"./ligar_arcondicionado\">\n"
+        "<button type=\"submit\">Ligar Ar Condicionado</button>\n"
+        "</form>\n"
+        "<form action=\"./ligar_luzes\">\n"
+        "<button type=\"submit\">Ligar Luzes</button>\n"
+        "</form>\n"
+        "<form action=\"./sleep_arcondicionado\">\n"
+        "<button type=\"submit\">Sleep para o Ar Condicionado</button>\n"
+        "</form>\n"
+        "<form action=\"./desligar_lampadas\">\n"
+        "<button type=\"submit\">Desligamento Automático das Lâmpadas</button>\n"
+        "</form>\n"
+        "<form action=\"./desligar_bomba_agua\">\n"
+        "<button type=\"submit\">Desligar a Bomba d'Água</button>\n"
+        "</form>\n"
+        "</div>\n"
+        "<div class=\"form-container\">\n"
+        "<h2>Monitoramento</h2>\n"
+        "<p class=\"temperature\">Temperatura Interna: %.2f °C</p>\n"
+        "<p class=\"temperature\">Nível de Água: 87 cm</p>\n"
+        "</div>\n"
+        "</div>\n"
+        "</body>\n"
+        "</html>\n", temperature);
 
-    // Escreve dados para envio (mas não os envia imediatamente).
+    // ========== ENVIO DA RESPOSTA HTTP ==========
+    // Escreve dados para envio (mas não os envia imediatamente)
+    // TCP_WRITE_FLAG_COPY copia os dados para buffer interno do TCP
     tcp_write(tpcb, html, strlen(html), TCP_WRITE_FLAG_COPY);
 
-    // Envia a mensagem
+    // Envia a mensagem efetivamente pela rede
     tcp_output(tpcb);
 
-    //libera memória alocada dinamicamente
+    // ========== LIMPEZA DE MEMÓRIA ==========
+    // Libera memória alocada dinamicamente para a requisição
     free(request);
     
-    //libera um buffer de pacote (pbuf) que foi alocado anteriormente
+    // Libera um buffer de pacote (pbuf) que foi alocado anteriormente
     pbuf_free(p);
 
-    return ERR_OK;
+    return ERR_OK; // Retorna sucesso
 }
 
+void vSystemMonitorTask(void *pvParameters)
+{
+    // TODO
+}
+
+void vSystemInit(void)
+{
+    // TODO
+}
+
+void vUpdateSystemStatusPage(void)
+{
+    // TODO
+}
+
+void init_web_server(void)
+{
+    // TODO
+}
+
+void liquid_level_control_task(void *pvParameters)
+{
+    // TODO
+}
+
+int read_water_level(void)
+{
+    return 0; // TODO
+}
+
+void vLDRTask(void *pvParameters)
+{
+    // TODO
+}
+
+void vPIRTask(void *pvParameters)
+{
+    // TODO
+}

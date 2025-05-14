@@ -1,6 +1,4 @@
-# HomeControl 🏠
-
-Um sistema de automação residencial inteligente baseado em Raspberry Pi Pico W com FreeRTOS
+# HomeControl 🏠 [Vídeo de Apresentação](https://drive.google.com/file/d/1jiRPtYcdyZPbyCSWV6SJhKmM9psdn7R6/view?usp=sharing)
 
 ![Status do Projeto](https://img.shields.io/badge/Status-Em%20Desenvolvimento-yellow)
 ![Licença](https://img.shields.io/badge/Licença-MIT-blue)
@@ -90,11 +88,22 @@ O HomeControl é um sistema de automação residencial inteligente que visa melh
 
 ## 🚀 Como Começar
 
+1. **Configure a Rede Wi-Fi**
+
+Antes de iniciar, edite o arquivo de configuração para definir as credenciais da rede Wi-Fi. Abra o arquivo `config.h` e edite os seguintes parâmetros:
+
+```c
+#define WIFI_SSID "seu_ssid"
+#define WIFI_PASSWORD "sua_senha"
+```
+
 ```bash
-# Clone este repositório
 git clone https://github.com/seu-usuario/home-control.git
-
-# Entre na pasta do projeto
 cd home-control
+mkdir build
+cd build
+cmake -G Ninja ..
+ninja
 
-# Siga as instruções de instalação no arquivo INSTALL.md
+# O arquivo .uf2 será gerado. Agora, copie o arquivo .uf2 para o dispositivo
+# Conecte seu Raspberry Pi Pico W ao computador e, em seguida, copie o arquivo .uf2 para o dispositivo
